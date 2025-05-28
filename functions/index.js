@@ -11,6 +11,7 @@
 // https://firebase.google.com/docs/functions/get-started
 
 const {onRequest} = require("firebase-functions/v2/https");
+const { onDocumentWritten } = require("firebase-functions/v2/firestore");
 const logger = require("firebase-functions/logger");
 const admin = require("firebase-admin");
 
@@ -56,7 +57,7 @@ exports.submitPrediction = onRequest(async (req, res) => {
   try {
     // const decodedToken = await admin.auth().verifyIdToken(idToken);
     // const uid = decodedToken.uid;
-    const uid = "test-user-123"; // fake user ID
+    const uid = "test-user-223"; // fake user ID
     const { raceId, prediction } = req.body;
 
     if (!raceId || !prediction || !prediction.p1 || !prediction.p2 || !prediction.p3) {
@@ -103,4 +104,51 @@ exports.updateRaceResult = onRequest(async (req, res) => {
   }
 });
 
+exports.calculateUserScores = onDocumentWritten("results/{raceId}", async (event) => {
+  const raceId = event.params.raceId;
+  const afterData = event.data?.after?.data();
 
+  if (!afterData) {
+    logger.info(`Result deleted for race: ${raceId}, skipping score calculation.`);
+    return;
+  }
+
+  const actual = afterData.result;
+  logger.info(`Calculating scores for race: ${raceId}`, actual);
+
+  try {
+    const predictionsSnapshot = await db.collection("predictions")
+      .where("raceId", "==", raceId)
+      .get();
+
+    const batch = db.batch();
+
+    predictionsSnapshot.forEach((doc) => {
+      const predictionData = doc.data();
+      const pred = predictionData.prediction;
+      const uid = predictionData.uid;
+
+      let score = 0;
+      ["p1", "p2", "p3"].forEach((pos) => {
+        if (pred[pos] === actual[pos]) {
+          score += 3;
+        } else if (Object.values(actual).includes(pred[pos])) {
+          score += 1;
+        }
+      });
+
+      const scoreRef = db.collection("scores").doc(`${uid}_${raceId}`);
+      batch.set(scoreRef, {
+        uid,
+        raceId,
+        score,
+        timestamp: new Date().toISOString(),
+      });
+    });
+
+    await batch.commit();
+    logger.info(`Scores calculated and saved for race: ${raceId}`);
+  } catch (error) {
+    logger.error("Error calculating scores:", error);
+  }
+});
