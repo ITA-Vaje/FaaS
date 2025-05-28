@@ -152,3 +152,29 @@ exports.calculateUserScores = onDocumentWritten("results/{raceId}", async (event
     logger.error("Error calculating scores:", error);
   }
 });
+
+exports.getLeaderboard = onRequest(async (req, res) => {
+  try {
+    const scoresSnapshot = await db.collection("scores").get();
+
+    const leaderboard = {};
+
+    scoresSnapshot.forEach((doc) => {
+      const { uid, score } = doc.data();
+      if (!leaderboard[uid]) {
+        leaderboard[uid] = 0;
+      }
+      leaderboard[uid] += score;
+    });
+
+    // Convert to array and sort
+    const sorted = Object.entries(leaderboard)
+      .map(([uid, totalScore]) => ({ uid, totalScore }))
+      .sort((a, b) => b.totalScore - a.totalScore);
+
+    res.status(200).send({ leaderboard: sorted });
+  } catch (error) {
+    logger.error("Error fetching leaderboard:", error);
+    res.status(500).send({ error: error.message });
+  }
+});
