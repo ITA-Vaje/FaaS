@@ -14,6 +14,10 @@ const {onRequest} = require("firebase-functions/v2/https");
 const logger = require("firebase-functions/logger");
 const admin = require("firebase-admin");
 
+const express = require("express");
+const app = express();
+app.use(express.json());
+
 
 admin.initializeApp();
 
@@ -74,3 +78,29 @@ exports.submitPrediction = onRequest(async (req, res) => {
     res.status(500).send({ error: error.message });
   }
 });
+
+exports.updateRaceResult = onRequest(async (req, res) => {
+  if (req.method !== "POST") {
+    return res.status(405).send("Method Not Allowed");
+  }
+
+  const { raceId, result } = req.body;
+
+  if (!raceId || !result || !result.p1 || !result.p2 || !result.p3) {
+    return res.status(400).send("Missing raceId or result (p1, p2, p3)");
+  }
+
+  try {
+    await admin.firestore().collection("results").doc(raceId).set({
+      result,
+      timestamp: new Date().toISOString(),
+    });
+
+    res.status(200).send({ message: "Race result updated" });
+  } catch (error) {
+    logger.error("Error updating race result:", error);
+    res.status(500).send({ error: error.message });
+  }
+});
+
+
