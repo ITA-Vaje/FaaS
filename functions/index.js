@@ -1,19 +1,9 @@
-/**
- * Import function triggers from their respective submodules:
- *
- * const {onCall} = require("firebase-functions/v2/https");
- * const {onDocumentWritten} = require("firebase-functions/v2/firestore");
- *
- * See a full list of supported triggers at https://firebase.google.com/docs/functions
- */
-
-// Create and deploy your first functions
-// https://firebase.google.com/docs/functions/get-started
-
 const {onRequest} = require("firebase-functions/v2/https");
 const { onDocumentWritten } = require("firebase-functions/v2/firestore");
 const logger = require("firebase-functions/logger");
 const admin = require("firebase-admin");
+const { onSchedule } = require("firebase-functions/v2/scheduler");
+const nodemailer = require("nodemailer");
 
 const express = require("express");
 const app = express();
@@ -179,7 +169,6 @@ exports.getLeaderboard = onRequest(async (req, res) => {
       leaderboard[uid] += score;
     });
 
-    // Convert to array and sort
     const sorted = Object.entries(leaderboard)
       .map(([uid, totalScore]) => ({ uid, totalScore }))
       .sort((a, b) => b.totalScore - a.totalScore);
@@ -190,3 +179,121 @@ exports.getLeaderboard = onRequest(async (req, res) => {
     res.status(500).send({ error: error.message });
   }
 });
+
+exports.addRace = onRequest(async (req, res) => {
+  if (req.method !== "POST") {
+    return res.status(405).send("Method Not Allowed");
+  }
+
+  const idToken = req.headers.authorization?.split("Bearer ")[1];
+  if (!idToken) {
+    return res.status(401).send("Missing auth token");
+  }
+
+  try {
+    const decodedToken = await admin.auth().verifyIdToken(idToken);
+    const isAdmin = decodedToken.admin === true;
+
+    if (!isAdmin) {
+      return res.status(403).send("Access denied: Admins only");
+    }
+
+    const { raceName, raceDate, location, round } = req.body;
+
+    if (!raceName || !raceDate) {
+      return res.status(400).send("Missing required fields: raceName and raceDate");
+    }
+
+    const raceData = {
+      raceName,
+      raceDate: new Date(raceDate), // should be ISO string or Date
+      location: location || null,
+      round: round || null,
+      createdAt: new Date().toISOString(),
+    };
+
+    const newRaceRef = await db.collection("races").add(raceData);
+    res.status(201).send({ message: "Race added", raceId: newRaceRef.id });
+
+  } catch (error) {
+    logger.error("Error adding race:", error);
+    res.status(500).send({ error: error.message });
+  }
+});
+
+exports.getRaces = onRequest(async (req, res) => {
+  const idToken = req.headers.authorization?.split("Bearer ")[1];
+
+  if (!idToken) {
+    return res.status(401).send("Missing auth token");
+  }
+
+  try {
+    await admin.auth().verifyIdToken(idToken);
+  } catch (error) {
+    return res.status(401).send("Invalid or expired token");
+  }
+
+  try {
+    const snapshot = await db.collection("races").orderBy("raceDate").get();
+
+    const races = snapshot.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data(),
+    }));
+
+    res.status(200).send({ races });
+  } catch (error) {
+    logger.error("Error fetching races:", error);
+    res.status(500).send({ error: error.message });
+  }
+});
+
+exports.sendPredictionReminder = onSchedule(
+  {
+    schedule: "every 2 minutes", // UTC time — adjust as needed
+    timeZone: "Europe/Ljubljana", // Your local timezone
+  },
+  async (event) => {
+    logger.info("Running scheduled reminder function...");
+
+    const now = new Date();
+    const next24h = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+
+    // 1. Find races within next 24h
+    const racesSnapshot = await db.collection("races")
+      .where("raceDate", ">=", now)
+      .where("raceDate", "<=", next24h)
+      .get();
+
+    if (racesSnapshot.empty) {
+      logger.info("No upcoming races in the next 24h.");
+      return;
+    }
+
+    // 2. Get all users
+    const listUsers = await admin.auth().listUsers();
+    const emails = listUsers.users.map(user => user.email).filter(Boolean);
+
+    // 3. Send emails
+    const transporter = nodemailer.createTransport({
+      service: "gmail", // or use your SMTP provider
+      auth: {
+        user: "your-email@gmail.com",
+        pass: "your-app-password",
+      },
+    });
+
+    const sendPromises = emails.map(email => {
+      return transporter.sendMail({
+        from: '"F1 Predictor" <your-email@gmail.com>',
+        to: email,
+        subject: "Reminder: Submit your race prediction!",
+        text: `There's a race coming up in the next 24h. Submit your prediction now!`,
+      });
+    });
+
+    await Promise.all(sendPromises);
+    logger.info(`Sent reminders to ${emails.length} users.`);
+  }
+);
