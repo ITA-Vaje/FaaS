@@ -49,15 +49,15 @@ exports.submitPrediction = onRequest(async (req, res) => {
     return res.status(405).send("Method Not Allowed");
   }
 
-//   const idToken = req.headers.authorization?.split("Bearer ")[1];
-//   if (!idToken) {
-//     return res.status(401).send("Missing auth token");
-//   }
+  const idToken = req.headers.authorization?.split("Bearer ")[1];
+  if (!idToken) {
+    return res.status(401).send("Missing auth token");
+  }
 
   try {
-    // const decodedToken = await admin.auth().verifyIdToken(idToken);
-    // const uid = decodedToken.uid;
-    const uid = "test-user-223"; // fake user ID
+    const decodedToken = await admin.auth().verifyIdToken(idToken);
+    const uid = decodedToken.uid;
+    //const uid = "test-user-223"; 
     const { raceId, prediction } = req.body;
 
     if (!raceId || !prediction || !prediction.p1 || !prediction.p2 || !prediction.p3) {
@@ -154,6 +154,18 @@ exports.calculateUserScores = onDocumentWritten("results/{raceId}", async (event
 });
 
 exports.getLeaderboard = onRequest(async (req, res) => {
+  const idToken = req.headers.authorization?.split("Bearer ")[1];
+  
+  if (!idToken) {
+    return res.status(401).send("Missing auth token");
+  }
+
+  try {
+    await admin.auth().verifyIdToken(idToken);
+  } catch (error) {
+    return res.status(401).send("Invalid or expired token");
+  }
+
   try {
     const scoresSnapshot = await db.collection("scores").get();
 
