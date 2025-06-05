@@ -15,18 +15,27 @@ admin.initializeApp();
 const db = admin.firestore();
 
 exports.registerUser = onRequest(async (req, res) => {
-  const { email, password } = req.body;
+  const { email, password, username } = req.body;
 
-  if (!email || !password) {
-    res.status(400).send("Email and password are required.");
+  if (!email || !password || !username) {
+    res.status(400).send("Email, password, and username are required.");
     return;
   }
 
   try {
+    // Create the user in Firebase Auth
     const userRecord = await admin.auth().createUser({
       email,
       password,
     });
+
+    // Save the username in Firestore under the user's UID
+    await admin.firestore().collection('users').doc(userRecord.uid).set({
+      email,
+      username,
+      createdAt: new Date().toISOString(),
+    });
+
     res.status(201).send({ message: "User created", uid: userRecord.uid });
   } catch (error) {
     logger.error("Error creating user:", error);
@@ -56,11 +65,11 @@ exports.submitPrediction = onRequest(async (req, res) => {
 
     const docId = `${raceId}_${uid}`;
 
-    await db.collection("predictions").add({
-    uid,
-    raceId,
-    prediction,
-    timestamp: new Date().toISOString()
+    await db.collection("predictions").doc(docId).set({
+      uid,
+      raceId,
+      prediction,
+      timestamp: new Date().toISOString()
     });
 
     res.status(200).send({ message: "Prediction submitted successfully" });
@@ -73,6 +82,16 @@ exports.submitPrediction = onRequest(async (req, res) => {
 exports.updateRaceResult = onRequest(async (req, res) => {
   if (req.method !== "POST") {
     return res.status(405).send("Method Not Allowed");
+  }
+
+  const idToken = req.headers.authorization?.split("Bearer ")[1];
+  if (!idToken) {
+    return res.status(401).send("Missing auth token");
+  }
+
+  const decodedToken = await admin.auth().verifyIdToken(idToken);
+  if (!decodedToken.admin) {
+    return res.status(403).send("Forbidden: Admin access only");
   }
 
   const { raceId, result } = req.body;
@@ -145,7 +164,7 @@ exports.calculateUserScores = onDocumentWritten("results/{raceId}", async (event
 
 exports.getLeaderboard = onRequest(async (req, res) => {
   const idToken = req.headers.authorization?.split("Bearer ")[1];
-  
+
   if (!idToken) {
     return res.status(401).send("Missing auth token");
   }
@@ -158,9 +177,9 @@ exports.getLeaderboard = onRequest(async (req, res) => {
 
   try {
     const scoresSnapshot = await db.collection("scores").get();
-
     const leaderboard = {};
 
+    // Aggregate scores by UID
     scoresSnapshot.forEach((doc) => {
       const { uid, score } = doc.data();
       if (!leaderboard[uid]) {
@@ -169,8 +188,28 @@ exports.getLeaderboard = onRequest(async (req, res) => {
       leaderboard[uid] += score;
     });
 
-    const sorted = Object.entries(leaderboard)
-      .map(([uid, totalScore]) => ({ uid, totalScore }))
+    // Get UIDs and fetch usernames
+    const uids = Object.keys(leaderboard);
+    const userDocs = await Promise.all(
+      uids.map(uid => db.collection("users").doc(uid).get())
+    );
+
+    const uidToUsername = {};
+    userDocs.forEach(doc => {
+      if (doc.exists) {
+        uidToUsername[doc.id] = doc.data().username || doc.id;
+      } else {
+        uidToUsername[doc.id] = doc.id; // fallback to UID
+      }
+    });
+
+    // Build and sort leaderboard with usernames
+    const sorted = uids
+      .map(uid => ({
+        uid,
+        username: uidToUsername[uid],
+        totalScore: leaderboard[uid]
+      }))
       .sort((a, b) => b.totalScore - a.totalScore);
 
     res.status(200).send({ leaderboard: sorted });
@@ -179,6 +218,7 @@ exports.getLeaderboard = onRequest(async (req, res) => {
     res.status(500).send({ error: error.message });
   }
 });
+
 
 exports.addRace = onRequest(async (req, res) => {
   if (req.method !== "POST") {
@@ -249,10 +289,80 @@ exports.getRaces = onRequest(async (req, res) => {
   }
 });
 
+exports.addDriver = onRequest(async (req, res) => {
+  if (req.method !== "POST") {
+    return res.status(405).send("Method Not Allowed");
+  }
+
+  const idToken = req.headers.authorization?.split("Bearer ")[1];
+  if (!idToken) {
+    return res.status(401).send("Missing auth token");
+  }
+
+  try {
+    const decodedToken = await admin.auth().verifyIdToken(idToken);
+    if (!decodedToken.admin) {
+      return res.status(403).send("Forbidden: Admin access only");
+    }
+
+    const { name, team, country } = req.body;
+    if (!name || !team || !country) {
+      return res.status(400).send("Missing required fields: name, team, country");
+    }
+
+    const newDriver = {
+      name,
+      team,
+      country,
+      createdAt: new Date().toISOString(),
+    };
+
+    const driverRef = await admin.firestore().collection("drivers").add(newDriver);
+
+    res.status(201).send({ message: "Driver added", driverId: driverRef.id });
+  } catch (error) {
+    logger.error("Error adding driver:", error);
+    res.status(500).send({ error: error.message });
+  }
+});
+
+exports.updateDriver = onRequest({ cors: true }, async (req, res) => {
+  const id = req.params.id;
+  const { name, team, country } = req.body;
+
+  try {
+    await setDoc(doc(db, 'drivers', id), { name, team, country }, { merge: true });
+    res.status(200).json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to update driver' });
+  }
+});
+
+
+exports.getDrivers = onRequest(async (req, res) => {
+  if (req.method !== "GET") {
+    return res.status(405).send("Method Not Allowed");
+  }
+
+  try {
+    const snapshot = await admin.firestore().collection("drivers").orderBy("name").get();
+    const drivers = snapshot.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data(),
+    }));
+
+    res.status(200).send({ drivers });
+  } catch (error) {
+    logger.error("Error fetching drivers:", error);
+    res.status(500).send({ error: error.message });
+  }
+});
+
+
 exports.sendPredictionReminder = onSchedule(
   {
-    schedule: "every 2 minutes", // UTC time — adjust as needed
-    timeZone: "Europe/Ljubljana", // Your local timezone
+    schedule: "every 2 minutes", 
+    timeZone: "Europe/Ljubljana", 
   },
   async (event) => {
     logger.info("Running scheduled reminder function...");

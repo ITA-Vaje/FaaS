@@ -26,6 +26,11 @@
       "enabled": true,
       "port": 4000
     },
+    "emulator": {
+      "firestore": {
+        "import": "./emulator-data"
+    }
+   },
     "singleProjectMode": true
   }
 }
